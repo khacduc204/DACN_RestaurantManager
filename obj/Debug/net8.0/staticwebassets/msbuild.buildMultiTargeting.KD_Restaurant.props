@@ -1,3 +1,0 @@
-﻿<Project>
-  <Import Project="..\build\KD_Restaurant.props" />
-</Project>

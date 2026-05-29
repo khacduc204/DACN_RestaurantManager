@@ -11,7 +11,6 @@
 }
 
 @section Styles {
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
     <style>
         .store-page {
             margin-top: 7.5rem;
@@ -274,12 +273,29 @@
 <script id="store-branch-data" type="application/json">@Html.Raw(branchJson)</script>
 
 @section Scripts {
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <script async defer src="https://maps.googleapis.com/maps/api/js?key=AIzaSyAl_iJC0m7qWNOFfVywnSUYL1VLSWh8ntk&callback=initStoreLocator"></script>
     <script>
-        (function () {
+        function initStoreLocator() {
             const branchDataElement = document.getElementById('store-branch-data');
-            const branchData = branchDataElement ? JSON.parse(branchDataElement.textContent || '[]') : [];
-            const defaultCoords = { lat: @Model.DefaultLatitude.ToString(System.Globalization.CultureInfo.InvariantCulture), lng: @Model.DefaultLongitude.ToString(System.Globalization.CultureInfo.InvariantCulture) };
+            const rawBranchData = branchDataElement ? JSON.parse(branchDataElement.textContent || '[]') : [];
+            const parseCoordinate = (value) => {
+                if (value === null || value === undefined) {
+                    return null;
+                }
+                if (typeof value === 'number') {
+                    return Number.isFinite(value) ? value : null;
+                }
+                const parsed = parseFloat(value);
+                return Number.isFinite(parsed) ? parsed : null;
+            };
+            const branchData = rawBranchData.map(branch => ({
+                ...branch,
+                latitude: parseCoordinate(branch.latitude),
+                longitude: parseCoordinate(branch.longitude)
+            }));
+            const defaultLat = parseCoordinate('@Model.DefaultLatitude.ToString(System.Globalization.CultureInfo.InvariantCulture)') ?? 10.762622;
+            const defaultLng = parseCoordinate('@Model.DefaultLongitude.ToString(System.Globalization.CultureInfo.InvariantCulture)') ?? 106.660172;
+            const defaultCoords = { lat: defaultLat, lng: defaultLng };
             const alertBox = document.getElementById('store-alert');
             const statusText = document.getElementById('location-status');
             const useLocationBtn = document.getElementById('btn-use-location');
@@ -288,17 +304,15 @@
             const searchBtn = document.getElementById('btn-search-address');
             const branchCards = document.querySelectorAll('.branch-card');
 
-            const map = L.map('store-map', {
-                zoomControl: false,
-                scrollWheelZoom: true
-            }).setView([defaultCoords.lat, defaultCoords.lng], 13);
+            const map = new google.maps.Map(document.getElementById('store-map'), {
+                center: { lat: defaultCoords.lat, lng: defaultCoords.lng },
+                zoom: 13,
+                mapId: 'KD_STORE_LOCATOR'
+            });
 
-            L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
-                maxZoom: 19,
-                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, &copy; <a href="https://carto.com/attributions">CARTO</a>'
-            }).addTo(map);
+            const infoWindow = new google.maps.InfoWindow();
 
-            L.control.zoom({ position: 'bottomright' }).addTo(map);
+            const hasValidCoords = (branch) => Number.isFinite(branch.latitude) && Number.isFinite(branch.longitude);
 
             const state = {
                 branchData,
@@ -335,63 +349,22 @@
                 return R * c;
             };
 
-            const cacheKeyForBranch = (branch) => `branch-geo-${branch.id}`;
-
-            const loadBranchFromCache = (branch) => {
-                try {
-                    const cached = localStorage.getItem(cacheKeyForBranch(branch));
-                    if (cached) {
-                        const parsed = JSON.parse(cached);
-                        return { ...branch, ...parsed };
-                    }
-                } catch (err) {
-                    console.warn('Không đọc được cache tọa độ', err);
-                }
-                return branch;
-            };
-
-            const saveBranchToCache = (branch) => {
-                if (!branch.latitude || !branch.longitude) return;
-                try {
-                    localStorage.setItem(cacheKeyForBranch(branch), JSON.stringify({ latitude: branch.latitude, longitude: branch.longitude }));
-                } catch (err) {
-                    // ignore quota issues
-                }
-            };
-
-            const geocodeAddress = async (query) => {
-                const url = new URL('https://nominatim.openstreetmap.org/search');
-                url.searchParams.set('format', 'json');
-                url.searchParams.set('limit', '1');
-                url.searchParams.set('countrycodes', 'vn');
-                url.searchParams.set('q', query);
-                const response = await fetch(url.toString(), {
-                    headers: {
-                        'Accept': 'application/json'
-                    }
-                });
-                if (!response.ok) {
-                    throw new Error('Không thể kết nối máy chủ bản đồ.');
-                }
-                const data = await response.json();
-                if (!Array.isArray(data) || data.length === 0) {
-                    throw new Error('Không tìm thấy vị trí phù hợp.');
-                }
-                return {
-                    lat: parseFloat(data[0].lat),
-                    lng: parseFloat(data[0].lon)
-                };
-            };
-
             const addOrUpdateBranchMarker = (branch) => {
-                if (!branch.latitude || !branch.longitude) return;
+                if (!hasValidCoords(branch)) return;
                 let marker = state.branchMarkers.get(branch.id);
                 if (!marker) {
-                    marker = L.marker([branch.latitude, branch.longitude]).addTo(map);
-                    marker.bindPopup(`<strong>${branch.name}</strong><br/>${branch.address}`);
+                    marker = new google.maps.Marker({
+                        position: { lat: branch.latitude, lng: branch.longitude },
+                        map,
+                        title: branch.name
+                    });
+                    marker.addListener('click', () => {
+                        infoWindow.setContent(`<strong>${branch.name}</strong><br/>${branch.address}`);
+                        infoWindow.open({ anchor: marker, map });
+                    });
                     state.branchMarkers.set(branch.id, marker);
                 } else {
-                    marker.setLatLng([branch.latitude, branch.longitude]);
+                    marker.setPosition({ lat: branch.latitude, lng: branch.longitude });
                 }
             };
 
@@ -403,7 +376,7 @@
                 let minDistance = Number.POSITIVE_INFINITY;
                 let nearestId = null;
                 state.branchData.forEach(branch => {
-                    if (branch.latitude && branch.longitude) {
+                    if (hasValidCoords(branch)) {
                         const distance = distanceInKm(state.userPosition.lat, state.userPosition.lng, branch.latitude, branch.longitude);
                         const label = document.querySelector(`.branch-card[data-branch-id="${branch.id}"] [data-distance-label]`);
                         if (label) {
@@ -425,36 +398,16 @@
                 }
             };
 
-            const ensureBranchCoordinates = async (branch) => {
-                if (branch.latitude && branch.longitude) {
-                    addOrUpdateBranchMarker(branch);
-                    return;
-                }
-                const cached = loadBranchFromCache(branch);
-                if (cached.latitude && cached.longitude) {
-                    branch.latitude = cached.latitude;
-                    branch.longitude = cached.longitude;
-                    addOrUpdateBranchMarker(branch);
-                    return;
-                }
-                try {
-                    const coords = await geocodeAddress(`${branch.address}, ${branch.name}`);
-                    branch.latitude = coords.lat;
-                    branch.longitude = coords.lng;
-                    saveBranchToCache(branch);
-                    addOrUpdateBranchMarker(branch);
-                    highlightNearestBranch();
-                } catch (err) {
-                    console.warn('Không geocode được chi nhánh', branch, err);
-                }
-            };
-
             const panToBranch = (branchId) => {
                 const branch = state.branchData.find(b => b.id === branchId);
-                if (branch?.latitude && branch?.longitude) {
-                    map.setView([branch.latitude, branch.longitude], 16);
+                if (branch && hasValidCoords(branch)) {
+                    map.panTo({ lat: branch.latitude, lng: branch.longitude });
+                    map.setZoom(16);
                     const marker = state.branchMarkers.get(branchId);
-                    marker?.openPopup();
+                    if (marker) {
+                        infoWindow.setContent(`<strong>${branch.name}</strong><br/>${branch.address}`);
+                        infoWindow.open({ anchor: marker, map });
+                    }
                 }
             };
 
@@ -471,17 +424,19 @@
                         lng: position.coords.longitude
                     };
                     if (!state.userMarker) {
-                        state.userMarker = L.marker([state.userPosition.lat, state.userPosition.lng], {
-                            icon: L.icon({
-                                iconUrl: 'https://cdn-icons-png.flaticon.com/512/684/684908.png',
-                                iconSize: [36, 36],
-                                iconAnchor: [18, 36]
-                            })
-                        }).addTo(map);
+                        state.userMarker = new google.maps.Marker({
+                            position: state.userPosition,
+                            map,
+                            icon: {
+                                url: 'https://cdn-icons-png.flaticon.com/512/684/684908.png',
+                                scaledSize: new google.maps.Size(36, 36)
+                            }
+                        });
                     } else {
-                        state.userMarker.setLatLng([state.userPosition.lat, state.userPosition.lng]);
+                        state.userMarker.setPosition(state.userPosition);
                     }
-                    map.setView([state.userPosition.lat, state.userPosition.lng], 15);
+                    map.panTo(state.userPosition);
+                    map.setZoom(15);
                     setStatus('Đã định vị bạn thành công.');
                     highlightNearestBranch();
                 }, error => {
@@ -491,31 +446,30 @@
             };
 
             const resetView = () => {
-                map.setView([defaultCoords.lat, defaultCoords.lng], 13);
+                map.panTo({ lat: defaultCoords.lat, lng: defaultCoords.lng });
+                map.setZoom(13);
                 setStatus('Quay lại trung tâm thành phố @Model.DefaultCityName.');
                 clearAlert();
             };
 
-            const searchAddress = async () => {
+            const searchAddress = () => {
                 const query = searchInput.value.trim();
                 if (!query) {
                     showAlert('Vui lòng nhập địa chỉ muốn tìm.', 'info');
                     return;
                 }
-                try {
-                    const coords = await geocodeAddress(query);
-                    state.userPosition = coords;
-                    if (!state.userMarker) {
-                        state.userMarker = L.marker([coords.lat, coords.lng]).addTo(map);
-                    } else {
-                        state.userMarker.setLatLng([coords.lat, coords.lng]);
-                    }
-                    map.setView([coords.lat, coords.lng], 15);
-                    setStatus(`Đang hiển thị xung quanh: ${query}.`);
-                    highlightNearestBranch();
+                const normalized = query.toLowerCase();
+                const found = state.branchData.find(branch =>
+                    (branch.name && branch.name.toLowerCase().includes(normalized)) ||
+                    (branch.address && branch.address.toLowerCase().includes(normalized))
+                );
+                if (found && hasValidCoords(found)) {
+                    panToBranch(found.id);
+                    setStatus(`Đang hiển thị: ${found.name}.`);
                     clearAlert();
-                } catch (err) {
-                    showAlert(err.message, 'error');
+                }
+                else {
+                    showAlert('Không tìm thấy chi nhánh phù hợp hoặc thiếu tọa độ.', 'warning');
                 }
             };
 
@@ -523,13 +477,11 @@
                 card.addEventListener('click', () => panToBranch(Number(card.dataset.branchId)));
             });
 
-            state.branchData.forEach(branch => {
-                ensureBranchCoordinates(branch);
-            });
+            state.branchData.forEach(addOrUpdateBranchMarker);
 
             useLocationBtn?.addEventListener('click', requestUserLocation);
             resetViewBtn?.addEventListener('click', resetView);
             searchBtn?.addEventListener('click', searchAddress);
-        })();
+        }
     </script>
 }
